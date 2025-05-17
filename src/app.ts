@@ -22,6 +22,8 @@ export interface AllTokensUpdate {
   tokens: TokenPercentageUpdate[];
   timestamp: number;
   averagePercentageChange: number;
+  averageA?: number | null;
+  averageB?: number | null;
 }
 
 export interface MatchInfo {
@@ -49,6 +51,8 @@ class BinanceWebSocketClient extends EventEmitter {
   private initialPrices: Map<string, { price: string; timestamp: number }> = new Map();
   // Store latest prices for tokens
   private latestPrices: Map<string, { price: string; timestamp: number }> = new Map();
+  private tokenSetA: string[] = [];
+  private tokenSetB: string[] = [];
   private trackedTokens: string[] = [];
   private initialTimestamp: number | null = null;
   
@@ -65,10 +69,12 @@ class BinanceWebSocketClient extends EventEmitter {
     super();
   }
 
-  public subscribeToSymbols(symbols: string[]): void {
+  public subscribeToSymbols(symbols: string[], setATokens?: string[], setBTokens?: string[]): void {
     // Reset initial data when subscribing to new set of tokens
     this.initialPrices.clear();
     this.initialTimestamp = null;
+    this.tokenSetA = [];
+    this.tokenSetB = [];
     this.trackedTokens = [];
     
     // Normalize symbols to lowercase and add usdt suffix if needed
@@ -79,6 +85,26 @@ class BinanceWebSocketClient extends EventEmitter {
     
     // Store the tracked tokens
     this.trackedTokens = normalizedSymbols;
+    
+    // If set A and B are provided, normalize and store them
+    if (setATokens && setATokens.length > 0) {
+      this.tokenSetA = setATokens.map(symbol => {
+        const normalizedSymbol = symbol.toLowerCase();
+        return normalizedSymbol.endsWith('usdt') ? normalizedSymbol : `${normalizedSymbol}usdt`;
+      });
+    }
+    
+    if (setBTokens && setBTokens.length > 0) {
+      this.tokenSetB = setBTokens.map(symbol => {
+        const normalizedSymbol = symbol.toLowerCase();
+        return normalizedSymbol.endsWith('usdt') ? normalizedSymbol : `${normalizedSymbol}usdt`;
+      });
+    }
+    
+    // If no specific sets were provided, consider all tokens as set A
+    if (this.tokenSetA.length === 0 && this.tokenSetB.length === 0) {
+      this.tokenSetA = [...normalizedSymbols];
+    }
     
     // Subscribe to each symbol
     for (const symbol of normalizedSymbols) {
@@ -378,9 +404,9 @@ class BinanceWebSocketClient extends EventEmitter {
       this.emit('percentage', percentageUpdate);
       
       // If all tracked tokens have updates, emit a combined update
-      const allTokenUpdates = this.getAllTokenPercentages();
+      const { updates: allTokenUpdates, averageA, averageB } = this.getAllTokenPercentages();
       if (allTokenUpdates.length === this.trackedTokens.length) {
-        // Calculate the average percentage change
+        // Calculate the overall average percentage change
         const totalPercentageChange = allTokenUpdates.reduce(
           (sum, token) => sum + token.percentageChange, 0
         );
@@ -389,43 +415,77 @@ class BinanceWebSocketClient extends EventEmitter {
         this.emit('allTokensUpdate', {
           tokens: allTokenUpdates,
           timestamp: update.timestamp,
-          averagePercentageChange: parseFloat(averagePercentageChange.toFixed(4))
+          averagePercentageChange: parseFloat(averagePercentageChange.toFixed(4)),
+          averageA,
+          averageB
         });
       }
     }
   }
-  
+
   /**
    * Get the latest percentage updates for all tracked tokens
+   * @returns An object containing all token updates and separate averages for set A and set B
    */
-  public getAllTokenPercentages(): TokenPercentageUpdate[] {
+  public getAllTokenPercentages(): {
+    updates: TokenPercentageUpdate[];
+    averageA: number | null;
+    averageB: number | null;
+  } {
     if (this.initialTimestamp === null) {
-      return [];
+      return { updates: [], averageA: null, averageB: null };
     }
-    
+
     const updates: TokenPercentageUpdate[] = [];
-    
+    const setAUpdates: TokenPercentageUpdate[] = [];
+    const setBUpdates: TokenPercentageUpdate[] = [];
+
     for (const symbol of this.trackedTokens) {
       const initialData = this.initialPrices.get(symbol);
       const latestData = this.latestPrices.get(symbol);
-      
+
       if (!initialData || !latestData) continue;
-      
+
       // Calculate the percentage change
       const initialPrice = parseFloat(initialData.price);
       const currentPrice = parseFloat(latestData.price);
       const percentageChange = ((currentPrice - initialPrice) / initialPrice) * 100;
-      
-      updates.push({
+
+      const update = {
         symbol,
         currentPrice: latestData.price,
         initialPrice: initialData.price,
         percentageChange: parseFloat(percentageChange.toFixed(4)),
         timestamp: latestData.timestamp
-      });
+      };
+
+      updates.push(update);
+
+      // Add to the appropriate set
+      if (this.tokenSetA.includes(symbol)) {
+        setAUpdates.push(update);
+      }
+
+      if (this.tokenSetB.includes(symbol)) {
+        setBUpdates.push(update);
+      }
     }
-    
-    return updates;
+
+    // Calculate averages for each set
+    let averageA: number | null = null;
+    let averageB: number | null = null;
+
+    if (setAUpdates.length > 0) {
+      const totalA = setAUpdates.reduce((sum, token) => sum + token.percentageChange, 0);
+      averageA = parseFloat((totalA / setAUpdates.length).toFixed(4));
+    }
+
+    if (setBUpdates.length > 0) {
+      const totalB = setBUpdates.reduce((sum, token) => sum + token.percentageChange, 0);
+      averageB = parseFloat((totalB / setBUpdates.length).toFixed(4));
+    }
+
+    return { updates, averageA, averageB };
   }
   
   /**
@@ -462,13 +522,28 @@ wss.on('connection', (ws) => {
   console.log('Client connected at', new Date(connectionTime).toISOString());
   clients.set(ws, { ws, connectedAt: connectionTime });
 
-  // Handle messages from clients
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
-      
+
       // Handle client commands
-      if (data.type === 'subscribe') {
+      if (data.type === 'subscribeToTokens') {
+        // Validate the request
+        if (!data.tokens || !Array.isArray(data.tokens)) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Invalid tokens data. Expected an array of token symbols.'
+          }));
+          return;
+        }
+
+        // Check for token sets A and B
+        const setATokens = data.setATokens && Array.isArray(data.setATokens) ? data.setATokens : [];
+        const setBTokens = data.setBTokens && Array.isArray(data.setBTokens) ? data.setBTokens : [];
+
+        // Subscribe to the tokens with set information
+        binanceClient.subscribeToSymbols(data.tokens, setATokens, setBTokens);
+      } else if (data.type === 'subscribe') {
         if (data.symbol) {
           console.log(`Client requested subscription to ${data.symbol}`);
           binanceClient.subscribeToSymbol(data.symbol);
@@ -513,24 +588,28 @@ wss.on('connection', (ws) => {
           }));
         }
       } else if (data.type === 'getAllTokenPercentages') {
-        const percentages = binanceClient.getAllTokenPercentages();
+        const { updates: percentages, averageA, averageB } = binanceClient.getAllTokenPercentages();
         const currentTime = Date.now();
         const clientInfo = clients.get(ws);
-        
+
         if (clientInfo) {
           const connectionDuration = currentTime - clientInfo.connectedAt;
           const durationInSeconds = (connectionDuration / 1000).toFixed(2);
-          
+
           ws.send(JSON.stringify({
             type: 'allTokenPercentages',
             data: percentages,
+            averageA,
+            averageB,
             connectionDuration: connectionDuration,
             connectionTime: `${durationInSeconds} seconds`
           }));
         } else {
           ws.send(JSON.stringify({
             type: 'allTokenPercentages',
-            data: percentages
+            data: percentages,
+            averageA,
+            averageB
           }));
         }
       }
