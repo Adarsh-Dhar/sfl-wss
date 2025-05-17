@@ -449,13 +449,18 @@ const wss = new WebSocket.Server({ server });
 // Serve static files from the public directory
 app.use(express.static('public'));
 
-// Store active client connections
-const clients = new Set<WebSocket>();
+// Store active client connections with their connection timestamps
+interface ClientConnection {
+  ws: WebSocket;
+  connectedAt: number;
+}
+const clients = new Map<WebSocket, ClientConnection>();
 
 // Handle WebSocket connections from clients
 wss.on('connection', (ws) => {
-  console.log('Client connected');
-  clients.add(ws);
+  const connectionTime = Date.now();
+  console.log('Client connected at', new Date(connectionTime).toISOString());
+  clients.set(ws, { ws, connectedAt: connectionTime });
 
   // Handle messages from clients
   ws.on('message', (message) => {
@@ -486,17 +491,48 @@ wss.on('connection', (ws) => {
         binanceClient.logMatchPerformance(data.teamOnePerformance, data.teamTwoPerformance);
       } else if (data.type === 'getMatchPriceLog') {
         const log = binanceClient.getMatchPriceLog(data.matchId);
-        ws.send(JSON.stringify({
-          type: 'matchPriceLog',
-          matchId: data.matchId,
-          log
-        }));
+        const currentTime = Date.now();
+        const clientInfo = clients.get(ws);
+        
+        if (clientInfo) {
+          const connectionDuration = currentTime - clientInfo.connectedAt;
+          const durationInSeconds = (connectionDuration / 1000).toFixed(2);
+          
+          ws.send(JSON.stringify({
+            type: 'matchPriceLog',
+            matchId: data.matchId,
+            log,
+            connectionDuration: connectionDuration,
+            connectionTime: `${durationInSeconds} seconds`
+          }));
+        } else {
+          ws.send(JSON.stringify({
+            type: 'matchPriceLog',
+            matchId: data.matchId,
+            log
+          }));
+        }
       } else if (data.type === 'getAllTokenPercentages') {
         const percentages = binanceClient.getAllTokenPercentages();
-        ws.send(JSON.stringify({
-          type: 'allTokenPercentages',
-          data: percentages
-        }));
+        const currentTime = Date.now();
+        const clientInfo = clients.get(ws);
+        
+        if (clientInfo) {
+          const connectionDuration = currentTime - clientInfo.connectedAt;
+          const durationInSeconds = (connectionDuration / 1000).toFixed(2);
+          
+          ws.send(JSON.stringify({
+            type: 'allTokenPercentages',
+            data: percentages,
+            connectionDuration: connectionDuration,
+            connectionTime: `${durationInSeconds} seconds`
+          }));
+        } else {
+          ws.send(JSON.stringify({
+            type: 'allTokenPercentages',
+            data: percentages
+          }));
+        }
       }
     } catch (error) {
       console.error('Error handling client message:', error);
@@ -517,51 +553,74 @@ wss.on('connection', (ws) => {
     }
   });
 
-  // Send welcome message to the client
+  // Send welcome message to the client with connection timestamp
   ws.send(JSON.stringify({
     type: 'info',
-    message: 'Connected to Binance WebSocket server'
+    message: 'Connected to Binance WebSocket server',
+    connectedAt: connectionTime,
+    connectionTime: new Date(connectionTime).toISOString()
   }));
 });
 
 // Forward Binance price updates to all connected clients
 binanceClient.on('price', (update: PriceUpdate) => {
-  const message = JSON.stringify({
-    type: 'price',
-    data: update
-  });
+  const currentTime = Date.now();
   
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+  clients.forEach((clientInfo, clientWs) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      const connectionDuration = currentTime - clientInfo.connectedAt;
+      const durationInSeconds = (connectionDuration / 1000).toFixed(2);
+      
+      const message = JSON.stringify({
+        type: 'price',
+        data: update,
+        connectionDuration: connectionDuration,
+        connectionTime: `${durationInSeconds} seconds`
+      });
+      
+      clientWs.send(message);
     }
   });
 });
 
 // Forward percentage updates to all connected clients
 binanceClient.on('percentage', (update: TokenPercentageUpdate) => {
-  const message = JSON.stringify({
-    type: 'percentage',
-    data: update
-  });
+  const currentTime = Date.now();
   
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+  clients.forEach((clientInfo, clientWs) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      const connectionDuration = currentTime - clientInfo.connectedAt;
+      const durationInSeconds = (connectionDuration / 1000).toFixed(2);
+      
+      const message = JSON.stringify({
+        type: 'percentage',
+        data: update,
+        connectionDuration: connectionDuration,
+        connectionTime: `${durationInSeconds} seconds`
+      });
+      
+      clientWs.send(message);
     }
   });
 });
 
 // Forward combined token updates to all connected clients
 binanceClient.on('allTokensUpdate', (update: AllTokensUpdate) => {
-  const message = JSON.stringify({
-    type: 'allTokensUpdate',
-    data: update
-  });
+  const currentTime = Date.now();
   
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+  clients.forEach((clientInfo, clientWs) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      const connectionDuration = currentTime - clientInfo.connectedAt;
+      const durationInSeconds = (connectionDuration / 1000).toFixed(2);
+      
+      const message = JSON.stringify({
+        type: 'allTokensUpdate',
+        data: update,
+        connectionDuration: connectionDuration,
+        connectionTime: `${durationInSeconds} seconds`
+      });
+      
+      clientWs.send(message);
     }
   });
 });
@@ -597,9 +656,9 @@ process.on('SIGINT', () => {
   console.log('Shutting down server...');
   binanceClient.disconnect();
   
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.close(1000, 'Server shutting down');
+  clients.forEach((clientInfo, clientWs) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close(1000, 'Server shutting down');
     }
   });
   
