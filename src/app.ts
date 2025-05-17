@@ -254,7 +254,7 @@ class BinanceWebSocketClient extends EventEmitter {
         this.emit('open', symbol);
       });
 
-      ws.on('message', (data) => {
+      ws.on('message', (data: Buffer | string | ArrayBuffer | Buffer[]) => {
         try {
           const parsed = JSON.parse(data.toString());
           
@@ -616,7 +616,7 @@ wss.on('connection', (ws) => {
   // Automatically start a 60-second session when a client connects
   binanceClient.startFixedSession();
 
-  ws.on('message', (message) => {
+  ws.on('message', (message: Buffer | string | ArrayBuffer | Buffer[]) => {
     try {
       const data = JSON.parse(message.toString());
 
