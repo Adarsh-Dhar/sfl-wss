@@ -15,6 +15,8 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
         this.reconnectTimeouts = new Map();
         this.isActive = true;
         this.activeMatch = null;
+        this.sessionTimer = null;
+        this.sessionEndTime = null;
         // Store initial prices for tokens
         this.initialPrices = new Map();
         // Store latest prices for tokens
@@ -108,6 +110,12 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
             clearTimeout(timeout);
             this.reconnectTimeouts.delete(symbol);
         });
+        // Clear session timer if exists
+        if (this.sessionTimer) {
+            clearTimeout(this.sessionTimer);
+            this.sessionTimer = null;
+            this.sessionEndTime = null;
+        }
     }
     /**
      * Check if there are any active WebSocket connections
@@ -383,6 +391,71 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
         this.latestPrices.clear();
         this.initialTimestamp = null;
     }
+    /**
+     * Start a timed session that will automatically end after the specified duration
+     * @param durationMs Duration in milliseconds
+     * @param callback Optional callback to execute when the session ends
+     */
+    startTimedSession(durationMs, callback) {
+        // Clear any existing timer
+        if (this.sessionTimer) {
+            clearTimeout(this.sessionTimer);
+        }
+        // Reset tracking to start fresh
+        this.resetTracking();
+        // Set the end time
+        this.sessionEndTime = Date.now() + durationMs;
+        // Create a new timer
+        this.sessionTimer = setTimeout(() => {
+            // Get final results
+            const finalResults = this.getFinalResults();
+            // Emit the final results
+            this.emit('sessionEnd', finalResults);
+            // Execute callback if provided
+            if (callback) {
+                callback();
+            }
+            // Clear the timer reference
+            this.sessionTimer = null;
+            this.sessionEndTime = null;
+        }, durationMs);
+        console.log(`Started timed session for ${durationMs / 1000} seconds`);
+    }
+    /**
+     * Start a fixed 60-second session
+     */
+    startFixedSession() {
+        const FIXED_DURATION_MS = 60 * 1000; // 60 seconds
+        this.startTimedSession(FIXED_DURATION_MS);
+    }
+    /**
+     * Get the remaining time in the current session (in milliseconds)
+     */
+    getRemainingSessionTime() {
+        if (!this.sessionEndTime) {
+            return null;
+        }
+        const remainingTime = this.sessionEndTime - Date.now();
+        return remainingTime > 0 ? remainingTime : 0;
+    }
+    /**
+     * Get the final results of the current tracking session
+     */
+    getFinalResults() {
+        const { updates, averageA, averageB } = this.getAllTokenPercentages();
+        // Calculate the overall average percentage change
+        const totalPercentageChange = updates.reduce((sum, token) => sum + token.percentageChange, 0);
+        const averagePercentageChange = updates.length > 0 ?
+            parseFloat((totalPercentageChange / updates.length).toFixed(4)) : 0;
+        return {
+            tokens: updates,
+            timestamp: Date.now(),
+            averagePercentageChange,
+            averageA,
+            averageB,
+            isFinalResult: true
+        };
+    }
 }
 // Create a singleton instance
 const binanceClient = new BinanceWebSocketClient();
@@ -398,6 +471,8 @@ wss.on('connection', (ws) => {
     const connectionTime = Date.now();
     console.log('Client connected at', new Date(connectionTime).toISOString());
     clients.set(ws, { ws, connectedAt: connectionTime });
+    // Automatically start a 60-second session when a client connects
+    binanceClient.startFixedSession();
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message.toString());
@@ -436,6 +511,25 @@ wss.on('connection', (ws) => {
             else if (data.type === 'resetTracking') {
                 console.log('Client requested to reset price tracking');
                 binanceClient.resetTracking();
+            }
+            else if (data.type === 'startTimedSession') {
+                // Validate the request
+                if (typeof data.duration !== 'number' || data.duration <= 0) {
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: 'Invalid duration. Expected a positive number in seconds.'
+                    }));
+                    return;
+                }
+                const durationMs = data.duration * 1000; // Convert seconds to milliseconds
+                console.log(`Client requested to start a timed session for ${data.duration} seconds`);
+                // Start the timed session
+                binanceClient.startTimedSession(durationMs);
+                ws.send(JSON.stringify({
+                    type: 'sessionStarted',
+                    duration: data.duration,
+                    startTime: Date.now()
+                }));
             }
             else if (data.type === 'setActiveMatch') {
                 console.log(`Client set active match: ${JSON.stringify(data.match)}`);
@@ -565,6 +659,25 @@ binanceClient.on('allTokensUpdate', (update) => {
                 connectionTime: `${durationInSeconds} seconds`
             });
             clientWs.send(message);
+        }
+    });
+});
+// Handle session end events
+binanceClient.on('sessionEnd', (finalResults) => {
+    console.log('Timed session ended, sending final results to all clients');
+    clients.forEach((clientInfo, clientWs) => {
+        if (clientWs.readyState === ws_1.default.OPEN) {
+            const message = JSON.stringify({
+                type: 'sessionEnd',
+                finalResults: finalResults
+            });
+            clientWs.send(message);
+            // Close the connection after sending the final results
+            setTimeout(() => {
+                if (clientWs.readyState === ws_1.default.OPEN) {
+                    clientWs.close(1000, 'Session ended');
+                }
+            }, 1000); // Give the client 1 second to receive the final results before closing
         }
     });
 });
