@@ -1,6 +1,6 @@
 // server.ts - Node.js WebSocket server for Binance price updates
 import WebSocket from 'ws';
-import express from 'express';
+import express, { Request, Response } from 'express';
 import http from 'http';
 import { EventEmitter } from 'events';
 
@@ -8,6 +8,20 @@ export interface PriceUpdate {
   symbol: string;
   price: string;
   timestamp: number;
+}
+
+export interface TokenPercentageUpdate {
+  symbol: string;
+  currentPrice: string;
+  initialPrice: string;
+  percentageChange: number;
+  timestamp: number;
+}
+
+export interface AllTokensUpdate {
+  tokens: TokenPercentageUpdate[];
+  timestamp: number;
+  averagePercentageChange: number;
 }
 
 export interface MatchInfo {
@@ -30,6 +44,14 @@ class BinanceWebSocketClient extends EventEmitter {
   private reconnectTimeouts: Map<string, NodeJS.Timeout> = new Map();
   private isActive: boolean = true;
   private activeMatch: MatchInfo | null = null;
+  
+  // Store initial prices for tokens
+  private initialPrices: Map<string, { price: string; timestamp: number }> = new Map();
+  // Store latest prices for tokens
+  private latestPrices: Map<string, { price: string; timestamp: number }> = new Map();
+  private trackedTokens: string[] = [];
+  private initialTimestamp: number | null = null;
+  
   private priceLog: Array<{
     matchId: string;
     timestamp: number;
@@ -43,16 +65,43 @@ class BinanceWebSocketClient extends EventEmitter {
     super();
   }
 
+  public subscribeToSymbols(symbols: string[]): void {
+    // Reset initial data when subscribing to new set of tokens
+    this.initialPrices.clear();
+    this.initialTimestamp = null;
+    this.trackedTokens = [];
+    
+    // Normalize symbols to lowercase and add usdt suffix if needed
+    const normalizedSymbols = symbols.map(symbol => {
+      const normalizedSymbol = symbol.toLowerCase();
+      return normalizedSymbol.endsWith('usdt') ? normalizedSymbol : `${normalizedSymbol}usdt`;
+    });
+    
+    // Store the tracked tokens
+    this.trackedTokens = normalizedSymbols;
+    
+    // Subscribe to each symbol
+    for (const symbol of normalizedSymbols) {
+      // If already connected to this symbol, don't create a new connection
+      if (this.connections.has(symbol)) {
+        continue;
+      }
+      
+      this.connectToSymbol(symbol);
+    }
+  }
+  
   public subscribeToSymbol(symbol: string): void {
     // Normalize symbol to lowercase
     const normalizedSymbol = symbol.toLowerCase();
+    const formattedSymbol = normalizedSymbol.endsWith('usdt') ? normalizedSymbol : `${normalizedSymbol}usdt`;
     
     // If already connected to this symbol, don't create a new connection
-    if (this.connections.has(normalizedSymbol)) {
+    if (this.connections.has(formattedSymbol)) {
       return;
     }
 
-    this.connectToSymbol(normalizedSymbol);
+    this.connectToSymbol(formattedSymbol);
   }
 
   public unsubscribeFromSymbol(symbol: string): void {
@@ -179,9 +228,11 @@ class BinanceWebSocketClient extends EventEmitter {
             price: parsed.p, // 'p' is the price field in aggTrade stream
             timestamp: parsed.E // 'E' is the event time
           };
-          console.log("update",update)
           
-          // Log price data if there's an active match
+          // Process the price update for percentage tracking
+          this.processPriceUpdate(update);
+          
+          // Log price data if there's an active match (keeping this for compatibility)
           if (this.activeMatch && this.activeMatch.isActive) {
             // Check if this symbol is relevant to the active match
             const allTokens = [
@@ -224,6 +275,7 @@ class BinanceWebSocketClient extends EventEmitter {
             }
           }
           
+          // Emit the original price update for backward compatibility
           this.emit('price', update);
         } catch (error) {
           console.error(`Error parsing WebSocket message for ${symbol}:`, error);
@@ -265,6 +317,125 @@ class BinanceWebSocketClient extends EventEmitter {
       }
     }
   }
+  
+  /**
+   * Process a price update and track percentage changes
+   */
+  private processPriceUpdate(update: PriceUpdate): void {
+    // If this token is not in our tracked list, ignore it
+    if (!this.trackedTokens.includes(update.symbol)) {
+      return;
+    }
+    
+    // Always store the latest price
+    this.latestPrices.set(update.symbol, {
+      price: update.price,
+      timestamp: update.timestamp
+    });
+    
+    // If we don't have an initial timestamp yet, check if we should set one
+    if (this.initialTimestamp === null) {
+      // Store this as the first price for this token
+      this.initialPrices.set(update.symbol, {
+        price: update.price,
+        timestamp: update.timestamp
+      });
+      
+      // If we have initial prices for all tracked tokens with the same timestamp (within 1 second)
+      // then set this as our initial timestamp
+      if (this.trackedTokens.every(token => this.initialPrices.has(token))) {
+        const timestamps = Array.from(this.initialPrices.values()).map(data => data.timestamp);
+        const minTimestamp = Math.min(...timestamps);
+        const maxTimestamp = Math.max(...timestamps);
+        
+        // Check if all timestamps are within 1 second of each other
+        if (maxTimestamp - minTimestamp < 1000) {
+          this.initialTimestamp = minTimestamp;
+          console.log(`Initial timestamp set to ${this.initialTimestamp} with prices:`, 
+            Object.fromEntries(this.initialPrices.entries()));
+        }
+      }
+      return;
+    }
+    
+    // If we have an initial timestamp, calculate percentage change
+    const initialData = this.initialPrices.get(update.symbol);
+    if (initialData) {
+      const initialPrice = parseFloat(initialData.price);
+      const currentPrice = parseFloat(update.price);
+      const percentageChange = ((currentPrice - initialPrice) / initialPrice) * 100;
+      
+      // Create percentage update object
+      const percentageUpdate: TokenPercentageUpdate = {
+        symbol: update.symbol,
+        currentPrice: update.price,
+        initialPrice: initialData.price,
+        percentageChange: parseFloat(percentageChange.toFixed(4)),
+        timestamp: update.timestamp
+      };
+      
+      // Emit the percentage update
+      this.emit('percentage', percentageUpdate);
+      
+      // If all tracked tokens have updates, emit a combined update
+      const allTokenUpdates = this.getAllTokenPercentages();
+      if (allTokenUpdates.length === this.trackedTokens.length) {
+        // Calculate the average percentage change
+        const totalPercentageChange = allTokenUpdates.reduce(
+          (sum, token) => sum + token.percentageChange, 0
+        );
+        const averagePercentageChange = totalPercentageChange / allTokenUpdates.length;
+        
+        this.emit('allTokensUpdate', {
+          tokens: allTokenUpdates,
+          timestamp: update.timestamp,
+          averagePercentageChange: parseFloat(averagePercentageChange.toFixed(4))
+        });
+      }
+    }
+  }
+  
+  /**
+   * Get the latest percentage updates for all tracked tokens
+   */
+  public getAllTokenPercentages(): TokenPercentageUpdate[] {
+    if (this.initialTimestamp === null) {
+      return [];
+    }
+    
+    const updates: TokenPercentageUpdate[] = [];
+    
+    for (const symbol of this.trackedTokens) {
+      const initialData = this.initialPrices.get(symbol);
+      const latestData = this.latestPrices.get(symbol);
+      
+      if (!initialData || !latestData) continue;
+      
+      // Calculate the percentage change
+      const initialPrice = parseFloat(initialData.price);
+      const currentPrice = parseFloat(latestData.price);
+      const percentageChange = ((currentPrice - initialPrice) / initialPrice) * 100;
+      
+      updates.push({
+        symbol,
+        currentPrice: latestData.price,
+        initialPrice: initialData.price,
+        percentageChange: parseFloat(percentageChange.toFixed(4)),
+        timestamp: latestData.timestamp
+      });
+    }
+    
+    return updates;
+  }
+  
+  /**
+   * Reset the tracking of initial prices and percentages
+   */
+  public resetTracking(): void {
+    this.initialPrices.clear();
+    this.latestPrices.clear();
+    this.initialTimestamp = null;
+  }
 }
 
 // Create a singleton instance
@@ -274,6 +445,9 @@ const binanceClient = new BinanceWebSocketClient();
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+
+// Serve static files from the public directory
+app.use(express.static('public'));
 
 // Store active client connections
 const clients = new Set<WebSocket>();
@@ -293,12 +467,18 @@ wss.on('connection', (ws) => {
         if (data.symbol) {
           console.log(`Client requested subscription to ${data.symbol}`);
           binanceClient.subscribeToSymbol(data.symbol);
+        } else if (data.symbols && Array.isArray(data.symbols)) {
+          console.log(`Client requested subscription to multiple symbols: ${data.symbols.join(', ')}`);
+          binanceClient.subscribeToSymbols(data.symbols);
         }
       } else if (data.type === 'unsubscribe') {
         if (data.symbol) {
           console.log(`Client requested unsubscription from ${data.symbol}`);
           binanceClient.unsubscribeFromSymbol(data.symbol);
         }
+      } else if (data.type === 'resetTracking') {
+        console.log('Client requested to reset price tracking');
+        binanceClient.resetTracking();
       } else if (data.type === 'setActiveMatch') {
         console.log(`Client set active match: ${JSON.stringify(data.match)}`);
         binanceClient.setActiveMatch(data.match);
@@ -310,6 +490,12 @@ wss.on('connection', (ws) => {
           type: 'matchPriceLog',
           matchId: data.matchId,
           log
+        }));
+      } else if (data.type === 'getAllTokenPercentages') {
+        const percentages = binanceClient.getAllTokenPercentages();
+        ws.send(JSON.stringify({
+          type: 'allTokenPercentages',
+          data: percentages
         }));
       }
     } catch (error) {
@@ -352,14 +538,51 @@ binanceClient.on('price', (update: PriceUpdate) => {
   });
 });
 
+// Forward percentage updates to all connected clients
+binanceClient.on('percentage', (update: TokenPercentageUpdate) => {
+  const message = JSON.stringify({
+    type: 'percentage',
+    data: update
+  });
+  
+  clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+});
+
+// Forward combined token updates to all connected clients
+binanceClient.on('allTokensUpdate', (update: AllTokensUpdate) => {
+  const message = JSON.stringify({
+    type: 'allTokensUpdate',
+    data: update
+  });
+  
+  clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+});
+
 // Start the server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`WebSocket server running on port ${PORT}`);
 });
 
-// Optional: Add a simple HTTP endpoint for checking server status
-app.get('/health', (req, res) => {
+// Enable JSON parsing for request bodies
+app.use(express.json());
+
+// Import API routes from the routes directory
+import { createApiRouter } from './routes/api';
+
+// Use the API router for /api routes
+app.use('/api', createApiRouter(binanceClient));
+
+// Simple health check endpoint directly on the app
+app.get('/health', function(req, res) {
   res.json({
     status: 'ok',
     connections: {
