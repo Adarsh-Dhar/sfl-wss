@@ -440,10 +440,10 @@ class BinanceWebSocketClient extends EventEmitter {
   public getAllTokenPercentages(): {
     updates: TokenPercentageUpdate[];
     averageA: number | null;
-    averageB: number | null;
+    averageB: number;
   } {
     if (this.initialTimestamp === null) {
-      return { updates: [], averageA: null, averageB: null };
+      return { updates: [], averageA: null, averageB: 0 };
     }
 
     const updates: TokenPercentageUpdate[] = [];
@@ -483,7 +483,8 @@ class BinanceWebSocketClient extends EventEmitter {
 
     // Calculate averages for each set
     let averageA: number | null = null;
-    let averageB: number | null = null;
+    // Initialize averageB to 0 instead of null
+    let averageB: number = 0;
 
     if (setAUpdates.length > 0) {
       const totalA = setAUpdates.reduce((sum, token) => sum + token.percentageChange, 0);
@@ -497,7 +498,7 @@ class BinanceWebSocketClient extends EventEmitter {
 
     return { updates, averageA, averageB };
   }
-  
+
   /**
    * Reset the tracking of initial prices and percentages
    */

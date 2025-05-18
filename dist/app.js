@@ -340,7 +340,7 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
      */
     getAllTokenPercentages() {
         if (this.initialTimestamp === null) {
-            return { updates: [], averageA: null, averageB: null };
+            return { updates: [], averageA: null, averageB: 0 };
         }
         const updates = [];
         const setAUpdates = [];
@@ -372,7 +372,8 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
         }
         // Calculate averages for each set
         let averageA = null;
-        let averageB = null;
+        // Initialize averageB to 0 instead of null
+        let averageB = 0;
         if (setAUpdates.length > 0) {
             const totalA = setAUpdates.reduce((sum, token) => sum + token.percentageChange, 0);
             averageA = parseFloat((totalA / setAUpdates.length).toFixed(4));
