@@ -1,6 +1,6 @@
 // server.ts - Node.js WebSocket server for Binance price updates
 import WebSocket from 'ws';
-import express, { Request, Response } from 'express';
+import express from 'express';
 import http from 'http';
 import { EventEmitter } from 'events';
 
@@ -551,7 +551,9 @@ class BinanceWebSocketClient extends EventEmitter {
    */
   public startFixedSession(): void {
     const FIXED_DURATION_MS = 60 * 1000; // 60 seconds
-    this.startTimedSession(FIXED_DURATION_MS);
+    this.startTimedSession(FIXED_DURATION_MS, () => {
+      console.log('Fixed 60-second session ended. Shutting down server after returning final score...');
+    });
   }
   
   /**
@@ -824,6 +826,18 @@ binanceClient.on('allTokensUpdate', (update: AllTokensUpdate) => {
 binanceClient.on('sessionEnd', (finalResults: AllTokensUpdate) => {
   console.log('Timed session ended, sending final results to all clients');
   
+  // Display the final score
+  console.log('FINAL SCORE:');
+  console.log('====================');
+  console.log(`Overall Average: ${finalResults.averagePercentageChange.toFixed(4)}%`);
+  if (finalResults.averageA !== undefined && finalResults.averageA !== null) {
+    console.log(`Team A Average: ${finalResults.averageA.toFixed(4)}%`);
+  }
+  if (finalResults.averageB !== undefined && finalResults.averageB !== null) {
+    console.log(`Team B Average: ${finalResults.averageB.toFixed(4)}%`);
+  }
+  console.log('====================');
+  
   clients.forEach((clientInfo, clientWs) => {
     if (clientWs.readyState === WebSocket.OPEN) {
       const message = JSON.stringify({
@@ -841,6 +855,12 @@ binanceClient.on('sessionEnd', (finalResults: AllTokensUpdate) => {
       }, 1000); // Give the client 1 second to receive the final results before closing
     }
   });
+  
+  // Shut down the server after a short delay to ensure all clients receive the final results
+  setTimeout(() => {
+    console.log('Shutting down server after returning final score...');
+    process.exit(0);
+  }, 2000); // Wait 2 seconds before shutting down
 });
 
 // Start the server

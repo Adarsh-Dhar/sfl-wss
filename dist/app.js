@@ -427,7 +427,9 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
      */
     startFixedSession() {
         const FIXED_DURATION_MS = 60 * 1000; // 60 seconds
-        this.startTimedSession(FIXED_DURATION_MS);
+        this.startTimedSession(FIXED_DURATION_MS, () => {
+            console.log('Fixed 60-second session ended. Shutting down server after returning final score...');
+        });
     }
     /**
      * Get the remaining time in the current session (in milliseconds)
@@ -666,6 +668,17 @@ binanceClient.on('allTokensUpdate', (update) => {
 // Handle session end events
 binanceClient.on('sessionEnd', (finalResults) => {
     console.log('Timed session ended, sending final results to all clients');
+    // Display the final score
+    console.log('FINAL SCORE:');
+    console.log('====================');
+    console.log(`Overall Average: ${finalResults.averagePercentageChange.toFixed(4)}%`);
+    if (finalResults.averageA !== undefined && finalResults.averageA !== null) {
+        console.log(`Team A Average: ${finalResults.averageA.toFixed(4)}%`);
+    }
+    if (finalResults.averageB !== undefined && finalResults.averageB !== null) {
+        console.log(`Team B Average: ${finalResults.averageB.toFixed(4)}%`);
+    }
+    console.log('====================');
     clients.forEach((clientInfo, clientWs) => {
         if (clientWs.readyState === ws_1.default.OPEN) {
             const message = JSON.stringify({
@@ -681,6 +694,11 @@ binanceClient.on('sessionEnd', (finalResults) => {
             }, 1000); // Give the client 1 second to receive the final results before closing
         }
     });
+    // Shut down the server after a short delay to ensure all clients receive the final results
+    setTimeout(() => {
+        console.log('Shutting down server after returning final score...');
+        process.exit(0);
+    }, 2000); // Wait 2 seconds before shutting down
 });
 // Start the server
 const PORT = process.env.PORT || 5000;
