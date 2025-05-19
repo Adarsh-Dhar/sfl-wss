@@ -231,7 +231,8 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
                         }
                     }
                     // Emit the original price update for backward compatibility
-                    this.emit('price', update);
+                    // Price events are not emitted anymore
+                    // Only process the update internally
                 }
                 catch (error) {
                     console.error(`Error parsing WebSocket message for ${symbol}:`, error);
@@ -317,7 +318,8 @@ class BinanceWebSocketClient extends events_1.EventEmitter {
                 timestamp: update.timestamp
             };
             // Emit the percentage update
-            this.emit('percentage', percentageUpdate);
+            // Percentage events are not emitted anymore
+            // Only process the update internally
             // If all tracked tokens have updates, emit a combined update
             const { updates: allTokenUpdates, averageA, averageB } = this.getAllTokenPercentages();
             if (allTokenUpdates.length === this.trackedTokens.length) {
@@ -614,40 +616,8 @@ wss.on('connection', (ws) => {
         connectionTime: new Date(connectionTime).toISOString()
     }));
 });
-// Forward Binance price updates to all connected clients
-binanceClient.on('price', (update) => {
-    const currentTime = Date.now();
-    clients.forEach((clientInfo, clientWs) => {
-        if (clientWs.readyState === ws_1.default.OPEN) {
-            const connectionDuration = currentTime - clientInfo.connectedAt;
-            const durationInSeconds = (connectionDuration / 1000).toFixed(2);
-            const message = JSON.stringify({
-                type: 'price',
-                data: update,
-                connectionDuration: connectionDuration,
-                connectionTime: `${durationInSeconds} seconds`
-            });
-            clientWs.send(message);
-        }
-    });
-});
-// Forward percentage updates to all connected clients
-binanceClient.on('percentage', (update) => {
-    const currentTime = Date.now();
-    clients.forEach((clientInfo, clientWs) => {
-        if (clientWs.readyState === ws_1.default.OPEN) {
-            const connectionDuration = currentTime - clientInfo.connectedAt;
-            const durationInSeconds = (connectionDuration / 1000).toFixed(2);
-            const message = JSON.stringify({
-                type: 'percentage',
-                data: update,
-                connectionDuration: connectionDuration,
-                connectionTime: `${durationInSeconds} seconds`
-            });
-            clientWs.send(message);
-        }
-    });
-});
+// Price and percentage events are not forwarded to clients
+// Only allTokensUpdate events will be sent
 // Forward combined token updates to all connected clients
 binanceClient.on('allTokensUpdate', (update) => {
     const currentTime = Date.now();
