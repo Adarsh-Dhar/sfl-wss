@@ -21,6 +21,7 @@ export interface TokenPercentageUpdate {
 export interface AllTokensUpdate {
   tokens: TokenPercentageUpdate[];
   timestamp: number;
+  initialTime?: number | null;
   averagePercentageChange: number;
   averageA?: number | null;
   averageB?: number | null;
@@ -425,6 +426,7 @@ class BinanceWebSocketClient extends EventEmitter {
         this.emit('allTokensUpdate', {
           tokens: allTokenUpdates,
           timestamp: update.timestamp,
+          initialTime: this.initialTimestamp,
           averagePercentageChange: parseFloat(averagePercentageChange.toFixed(4)),
           averageA,
           averageB
@@ -547,15 +549,14 @@ class BinanceWebSocketClient extends EventEmitter {
   }
   
   /**
-   * Start a fixed 60-second session
+   * Start a continuous session that doesn't automatically end
    */
   public startFixedSession(): void {
-    const FIXED_DURATION_MS = 60 * 1000; // 60 seconds
-    this.startTimedSession(FIXED_DURATION_MS, () => {
-      console.log('Fixed 60-second session ended. Shutting down server after returning final score...');
-    });
+    // Reset tracking to start fresh
+    this.resetTracking();
+    console.log('Started continuous session. Server will keep running until manually stopped.');
   }
-  
+
   /**
    * Get the remaining time in the current session (in milliseconds)
    */
@@ -847,20 +848,13 @@ binanceClient.on('sessionEnd', (finalResults: AllTokensUpdate) => {
       
       clientWs.send(message);
       
-      // Close the connection after sending the final results
-      setTimeout(() => {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.close(1000, 'Session ended');
-        }
-      }, 1000); // Give the client 1 second to receive the final results before closing
+      // Keep connections open instead of closing them
+      console.log('Sent final results to client, keeping connection open.');
     }
   });
   
-  // Shut down the server after a short delay to ensure all clients receive the final results
-  setTimeout(() => {
-    console.log('Shutting down server after returning final score...');
-    process.exit(0);
-  }, 2000); // Wait 2 seconds before shutting down
+  // Keep the server running instead of shutting down
+  console.log('Session ended, but server will continue running. New clients can still connect.');
 });
 
 // Start the server
